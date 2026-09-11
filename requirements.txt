@@ -1,0 +1,3 @@
+# Lighter 环境；Aster 请在独立虚拟环境中使用 requirements-aster.txt。
+lighter-sdk>=1.1.2
+python-dotenv>=1.2.2
