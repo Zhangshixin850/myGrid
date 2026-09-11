@@ -10,21 +10,7 @@
 
 &#x20; - requirements-aster.txt：Aster 环境。
 
-
-
-&#x20; Ubuntu 上运行 Lighter：
-
-
-
-&#x20; python3 -m venv .venv-lighter
-
-&#x20; source .venv-lighter/bin/activate
-
-&#x20; pip install -r requirements.txt
-
-
-
-&#x20; 然后配置：
+&#x20;然后配置：
 
 
 
@@ -38,15 +24,27 @@
 
 
 
-&#x20; 运行：
+&#x20; Ubuntu 上运行 Lighter：
 
 
+
+&#x20; python3 -m venv .venv-lighter
+
+&#x20; source .venv-lighter/bin/activate
+
+&#x20; pip install -r requirements.txt
 
 &#x20; python ccxt\_grid.py
 
 
 
+当ctrl+c停止脚本后，想再次运行脚本：
 
+cd \~/myGrid
+
+source .venv-lighter/bin/activate
+
+python ccxt\_grid.py
 
 
 
@@ -178,5 +176,5 @@ ccxt包的文档：https://github.com/ccxt/ccxt
 
 
 
-&#x20; 
+&#x20;
 
