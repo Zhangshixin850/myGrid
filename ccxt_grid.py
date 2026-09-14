@@ -133,6 +133,7 @@ class GridTrader:
         self.myloop = 0
         self.counter = 0
         self.myNewPrice = 0.0
+        self.last_fill_price = 0.0
         logger.info(f"{exchange_id} connected, symbol={self.symbol}, gridStep={self.gridStep}, orderSize={self.orderSize}")
         self.notify(f"{self.name} started: {exchange_id} {self.symbol}, gridStep={self.gridStep}, orderSize={self.orderSize}") #微信通知
 
@@ -225,9 +226,10 @@ class GridTrader:
             raise RuntimeError(f"fetch_open_orders failed: {e}") from e
         prices = [float(o["price"]) for o in orders if o.get("price")] # 获取挂单价格列表
         total_amount = sum(float(o.get("amount") or 0) for o in orders)
-        target = (self.baseline - self.myNewPrice) * self.orderSize / self.gridStep + self.left
+        target_price = self.last_fill_price or self.myNewPrice
+        target = (self.baseline - target_price) * self.orderSize / self.gridStep + self.left
         logger.info(
-            f"{self.name} symbol={self.symbol} price={self.myNewPrice} position={size} "
+            f"{self.name} symbol={self.symbol} price={self.myNewPrice} targetPrice={target_price} position={size} "
             f"target={round(target, 5)} diff={round(size - target, 5)}（-买+卖） pnl={pnl:.4f} "
             f"openOrders={len(orders)} maxOrder={max(prices) if prices else 0} "
             f"minOrder={min(prices) if prices else 0} liquidation={liquidation} "
@@ -279,7 +281,7 @@ class GridTrader:
                     raise RuntimeError(f"create_order returned no id: {order}")
                 self.All_orders[order_id] = [1 if i == half else 0, price, side]
                 logger.info(f"Placed {side} order id={order_id} amount={amount} price={price}")
-                time.sleep(0.1)
+                time.sleep(0.05)
         logger.info("Grid orders placed")
 
     def poller(self):
@@ -291,9 +293,23 @@ class GridTrader:
         if orders is None:  # Lighter 接入：空响应不参与订单状态推断
             return  # Lighter 接入：等待下一轮获取有效响应
 
+        if len(orders) < self.gridLines // 3:
+            logger.warning(
+                f"Risk control triggered: too few open orders, "
+                f"orders={len(orders)}, minimum={self.gridLines // 3}"
+            )
+            self.notify(
+                f"{self.name} risk triggered: too few open orders, "
+                f"orders={len(orders)}, minimum={self.gridLines // 3}"
+            )
+            if self.cancel_on_risk:
+                self.cancel_open_orders("too few open orders")
+            sys.exit(1)
+
         open_ids = {str(o["id"]) for o in orders if o.get("id")}  # Lighter 接入：统一字符串订单 ID
         missing_ids = set(self.All_orders) - open_ids  # Lighter 接入：先视为待确认的消失订单
         filled_ids = missing_ids  # Lighter 接入：CCXT 平台沿用原有成交推断
+        canceled_ids = set()
         if self.exchange_id == "lighter" and missing_ids:  # Lighter 接入：查询排序器最终状态
             try:  # Lighter 接入：状态查询失败时不误补反向单
                 statuses = self.exchange.fetch_order_statuses(  # Lighter 接入：批量查询消失订单
@@ -304,45 +320,57 @@ class GridTrader:
                 logger.warning(f"fetch Lighter order statuses failed: {e}")  # Lighter 接入：保留诊断信息
                 return  # Lighter 接入：状态未知时禁止推断成交
 
-            canceled_ids = {  # Lighter 接入：拒单和撤单不能当作成交
+            canceled_ids = {  # Lighter 接入：撤单按原参数重新挂单
                 order_id
                 for order_id, status in statuses.items()
-                if status.startswith("canceled")
+                if str(status).lower().startswith("canceled")
             }
-            if canceled_ids:  # Lighter 接入：交给现有关键错误计数和撤单退出逻辑
-                raise RuntimeError(  # Lighter 接入：避免错误建立反向仓位
-                    f"Lighter orders were canceled or rejected: {sorted(canceled_ids)}"
-                )
             filled_ids = {  # Lighter 接入：只有明确 filled 才执行补单
                 order_id
                 for order_id in missing_ids
-                if statuses.get(order_id) == "filled"
+                if str(statuses.get(order_id)).lower() == "filled"
             }
 
-        if len(orders) < self.gridLines // 3:  # Lighter 接入：状态确认后保留原低挂单保护
-            return  # Lighter 接入：沿用原有低挂单数量处理
-
-        if not filled_ids:
+        replacement_ids = canceled_ids | filled_ids
+        if not replacement_ids:
             return
 
+        last_price = self.last_fill_price or self.myNewPrice
+        replacement_ids = sorted(
+            replacement_ids,
+            key=lambda order_id: (
+                abs(float(self.All_orders[order_id][1]) - last_price),
+                float(self.All_orders[order_id][1]),
+                order_id,
+            ),
+        )
+
         # 最外层边界单成交后，切换到重建网格模式。
-        for order_id in filled_ids:
-            if self.All_orders[order_id][0] == 1:
-                self.myNewPrice = float(self.All_orders[order_id][1])
-                self.switc = True
-                logger.info(f"Edge order filled id={order_id}, reset grid at {self.myNewPrice}")
-                return
+        edge_ids = [
+            order_id
+            for order_id in replacement_ids
+            if order_id in filled_ids and self.All_orders[order_id][0] == 1
+        ]
+        if edge_ids:
+            order_id = edge_ids[-1]
+            self.last_fill_price = float(self.All_orders[order_id][1])
+            self.myNewPrice = self.last_fill_price
+            self.switc = True
+            logger.info(f"Edge order filled id={order_id}, reset grid at {self.myNewPrice}")
+            return
 
-        last_price = self.myNewPrice
-        # 普通网格单成交后，在相邻网格价格补一张反向单。
-        for order_id in filled_ids:
-            _, old_price, old_side = self.All_orders[order_id]
+        # canceled 订单原样重挂；普通成交单在相邻网格价格补一张反向单。
+        for order_id in replacement_ids:
+            edge, old_price, old_side = self.All_orders[order_id]
             old_price = float(old_price)
-            if abs(old_price - last_price) > abs(self.myNewPrice - last_price):
-                self.myNewPrice = old_price
-
-            side = "sell" if old_side == "buy" else "buy"
-            price = old_price + self.gridStep if old_side == "buy" else old_price - self.gridStep
+            if order_id in canceled_ids:
+                side = old_side
+                price = old_price
+                new_edge = edge
+            else:
+                side = "sell" if old_side == "buy" else "buy"
+                price = old_price + self.gridStep if old_side == "buy" else old_price - self.gridStep
+                new_edge = 0
             amount = float(self.exchange.amount_to_precision(self.symbol, self.orderSize))
             price = float(self.exchange.price_to_precision(self.symbol, price))
             self.validate_order(amount, price)
@@ -350,11 +378,19 @@ class GridTrader:
             new_id = str(order.get("id") or "")
             if not new_id:
                 raise RuntimeError(f"create_order returned no id: {order}")
-            self.All_orders[new_id] = [0, price, side]
+            self.All_orders[new_id] = [new_edge, price, side]
             del self.All_orders[order_id]
-            self.counter += 1
-            logger.info(f"Filled id={order_id}, placed {side} id={new_id} price={price}, count={self.counter}")
-            time.sleep(0.1)
+            if order_id in canceled_ids:
+                logger.warning(
+                    f"Canceled id={order_id}, replaced {side} id={new_id} "
+                    f"amount={amount} price={price}"
+                )
+            else:
+                self.last_fill_price = old_price
+                self.myNewPrice = old_price
+                self.counter += 1
+                logger.info(f"Filled id={order_id}, placed {side} id={new_id} price={price}, count={self.counter}")
+            time.sleep(0.05)
 
     def close(self):  # Lighter 接入：统一释放交易所客户端资源
         close_method = getattr(self.exchange, "close", None)  # Lighter 接入：兼容 CCXT 与 Lighter

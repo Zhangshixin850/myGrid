@@ -35,6 +35,7 @@ pip-wheel-metadata/
 
 # Runtime logs and local state
 *.log
+log.txt
 *_ccxt_log.txt
 *.pid
 *.sqlite
