@@ -144,6 +144,7 @@ v2.1：
 2\.在.env里添加与ondoperps有关的项目，如登录密钥变量。
 
 3\.添加ondo平台的requirements文件。
+- 在 ondo_exchange.py 加载市场时建立映射，例如 BTC/USDT:USDT ↔ BTC-USD.P、ETH/USDT:USDT ↔ ETH-USD.P；仅映射实际存在的有效永续市场。
 
 要求：
 
@@ -172,7 +173,9 @@ ONDO_API_URL=https://api.ondoperps.xyz
 ONDO_TIMEOUT=10
 ```
 
-修改原有 `EXCHANGE` 为 `ondo`，使用原生交易对名称，例如 `SYMBOL=BTC-USD.P` 或 `SYMBOL=AAPL-USD.P`。同名配置以文件中最后一项为准；已有系统环境变量优先。同时为所选交易对设置 `orderSize`、`gridStep`、价格边界、基准价及仓位上限，不能直接沿用其他币种的参数。当前平台没有 DOGE 永续市场。
+修改原有 `EXCHANGE` 为 `ondo`，交易对统一使用 `SYMBOL=BTC/USDT:USDT`、`SYMBOL=ETH/USDT:USDT` 或 `SYMBOL=AAPL/USDT:USDT` 格式。仍兼容 `BTC-USD.P` 等原生旧格式，程序会将其归一化为统一名称。同名配置以文件中最后一项为准；已有系统环境变量优先。同时为所选交易对设置 `orderSize`、`gridStep`、价格边界、基准价及仓位上限，不能直接沿用其他币种的参数。可用交易对以接口实际返回的有效市场为准。
+
+`BASE/USDT:USDT` 是本项目统一的配置别名：适配器将其映射到 `BTC-USD.P` 等真实市场 ID 后发送请求，返回的持仓和订单也使用统一名称。该别名不改变平台实际报价及结算币种，市场信息保留真实 `quote` 和原始数据。
 
 数量按市场 `baseIncrement` 向下取整，价格按 `quoteIncrement` 四舍五入；`gridStep` 必须是价格步长的正整数倍。数量单位是标的资产数量。
 

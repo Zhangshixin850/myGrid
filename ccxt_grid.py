@@ -98,6 +98,8 @@ class GridTrader:
             sys.exit(f"Cannot load swap market {self.symbol}: {e}")
         if not market.get("swap"):
             sys.exit(f"{self.symbol} is not a perpetual swap market")
+        if exchange_id == "ondo":  # Ondo 接入：旧格式配置也归一化为统一 symbol
+            self.symbol = market["symbol"]
 
         self.name = name
         self.gridStep = float(os.getenv("gridStep", 0))

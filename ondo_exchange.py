@@ -55,6 +55,7 @@ class OndoExchange:
         self._requests = requests
         self._session = requests.Session()
         self._markets = {}
+        self._markets_by_id = {}
         self._closed = False
 
     @classmethod
@@ -142,9 +143,9 @@ class OndoExchange:
         response = self._request("GET", "/v1/markets")
         markets = {}
         for detail in response["result"]["perps"]["tradingPairs"]:
-            symbol = detail["market"]
+            market_id = detail["market"]
             if (
-                not symbol.endswith(".P") or detail.get("disabled")
+                not market_id.endswith(".P") or detail.get("disabled")
                 or detail.get("tradingState", "TRADING") != "TRADING"
             ):
                 continue
@@ -152,12 +153,17 @@ class OndoExchange:
             price_step = Decimal(detail["quoteIncrement"])
             if any(not step.is_finite() or step <= 0
                    for step in (amount_step, price_step)):
-                raise ValueError(f"Invalid Ondo increments for {symbol}")
+                raise ValueError(f"Invalid Ondo increments for {market_id}")
             pair = detail.get("pair") or {}
+            base = (pair.get("base") or market_id.rsplit("-", 1)[0]).upper()
+            # USDT 格式仅作配置别名，请求仍使用原生市场 ID。
+            symbol = f"{base}/USDT:USDT"
+            if symbol in markets:
+                raise ValueError(f"Ambiguous Ondo symbol {symbol!r}")
             markets[symbol] = {
-                "id": symbol,
+                "id": market_id,
                 "symbol": symbol,
-                "base": pair.get("base") or symbol.rsplit("-", 1)[0],
+                "base": base,
                 "quote": pair.get("quote") or "USD",
                 "swap": True,
                 "active": True,
@@ -174,16 +180,18 @@ class OndoExchange:
         if not markets:
             raise RuntimeError("Ondo returned no active perpetual markets")
         self._markets = markets
+        self._markets_by_id = {m["id"].upper(): m for m in markets.values()}
         return markets
 
     def market(self, symbol):
         if not self._markets:
             self.load_markets()
-        market = self._markets.get(symbol.strip().upper())
+        symbol = symbol.strip().upper()
+        market = self._markets.get(symbol) or self._markets_by_id.get(symbol)
         if market is None:
             raise ValueError(
                 f"Ondo perpetual market {symbol!r} was not found; "
-                "use a native symbol such as BTC-USD.P"
+                "use a symbol such as BTC/USDT:USDT (also accepts BTC-USD.P)"
             )
         return market
 
@@ -225,9 +233,14 @@ class OndoExchange:
         return {"mark": mark, "last": None, "close": mark}
 
     def fetch_positions(self, symbols=None):
+        if not self._markets:
+            self.load_markets()
         response = self._request("GET", "/v1/perps/positions")
         requested = symbols if symbols is not None else list(self._markets)
-        symbols_by_market = {self.market(s)["id"]: s for s in requested}
+        symbols_by_market = {}
+        for symbol in requested:
+            market = self.market(symbol)
+            symbols_by_market[market["id"]] = market["symbol"]
         positions = []
         for position in response["result"]:
             symbol = symbols_by_market.get(position["market"])
@@ -248,8 +261,7 @@ class OndoExchange:
             })
         return positions
 
-    @staticmethod
-    def _parse_order(order):
+    def _parse_order(self, order):
         order_id = str(order["orderId"] or "")
         amount = Decimal(order["size"])
         filled = Decimal(order["filledSize"])
@@ -271,7 +283,7 @@ class OndoExchange:
         return {
             "id": order_id,
             "clientOrderId": order.get("clientOrderId"),
-            "symbol": order["market"],
+            "symbol": self.market(order["market"])["symbol"],
             "price": float(order["price"] or 0),
             "amount": float(amount),
             "filled": float(filled),
@@ -314,7 +326,7 @@ class OndoExchange:
                     continue
                 raise
             order = self._parse_order(response["result"])
-            if order["symbol"] != market["id"] or order["id"] != order_id:
+            if order["symbol"] != market["symbol"] or order["id"] != order_id:
                 raise ValueError("Ondo returned a different order")
             statuses[order_id] = order["status"]
         return statuses
@@ -359,7 +371,7 @@ class OndoExchange:
             except (KeyError, TypeError, ValueError, InvalidOperation):
                 continue
             if (
-                order["symbol"] == market["id"]
+                order["symbol"] == market["symbol"]
                 and order["clientOrderId"] == client_id
             ):
                 return order
