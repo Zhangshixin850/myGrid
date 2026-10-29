@@ -6,9 +6,11 @@ import sys
 import time
 import json
 import urllib.request
+from decimal import Decimal  # Ondo 接入：按市场步长校验网格间距
 
 from dotenv import load_dotenv
 from lighter_exchange import LighterExchange  # Lighter 接入：加载原生 SDK 适配器
+from ondo_exchange import OndoExchange, OndoFatalError  # Ondo 接入：REST 适配器和停机异常
 
 
 load_dotenv()
@@ -30,18 +32,18 @@ logger.addHandler(console_handler)
 
 class GridTrader:
     def __init__(self):
-        # 交易所由 .env 的 EXCHANGE 控制；Lighter 使用原生 SDK，其他平台使用 CCXT。
+        # Lighter 使用原生 SDK，Ondo 使用 REST，其他平台使用 CCXT。
         exchange_id = os.getenv("EXCHANGE", "").strip().strip("'\"").lower()
         if not exchange_id:
             sys.exit("Missing EXCHANGE in .env")
         ccxt_module = None  # Lighter 接入：Lighter 环境无需安装存在依赖冲突的 CCXT
-        if exchange_id != "lighter":  # Lighter 接入：仅 CCXT 平台加载 CCXT 包
+        if exchange_id not in ("lighter", "ondo"):  # Ondo 接入：原生适配器不加载 CCXT
             try:  # Lighter 接入：给缺少平台依赖提供明确提示
                 import ccxt as ccxt_module  # Lighter 接入：延迟导入隔离 urllib3 版本
             except ImportError:  # Lighter 接入：阻止缺少 CCXT 时继续启动
                 sys.exit("ccxt is not installed; use requirements-aster.txt")  # Lighter 接入：提示对应依赖文件
         if (  # Lighter 接入：允许原生 SDK 平台
-            exchange_id != "lighter"
+            exchange_id not in ("lighter", "ondo")  # Ondo 接入：允许 REST 平台
             and not hasattr(ccxt_module, exchange_id)
         ):
             sys.exit(f"ccxt does not support exchange: {exchange_id}")
@@ -55,6 +57,11 @@ class GridTrader:
                 self.exchange = LighterExchange.from_env()  # Lighter 接入：使用 API 私钥连接
             except Exception as e:  # Lighter 接入：禁止凭据错误时进入主循环
                 sys.exit(f"Cannot initialize Lighter: {e}")  # Lighter 接入：退出且不输出密钥
+        elif exchange_id == "ondo":  # Ondo 接入：使用 API Key 签名
+            try:
+                self.exchange = OndoExchange.from_env()
+            except Exception as e:
+                sys.exit(f"Cannot initialize Ondo: {e}")
         elif exchange_id == "aster":  # Lighter 接入：保留原有 Aster 分支
             private_key = os.getenv("PRIVATE_KEY", "").strip().strip("'\"")
             wallet_address = os.getenv("WALLET_ADDRESS", "").strip().strip("'\"")
@@ -75,7 +82,7 @@ class GridTrader:
             if password:
                 config["password"] = password
 
-        if exchange_id != "lighter":  # Lighter 接入：CCXT 平台继续使用原初始化方式
+        if exchange_id not in ("lighter", "ondo"):  # Ondo 接入：仅初始化 CCXT 平台
             exchange_class = getattr(ccxt_module, exchange_id)  # Lighter 接入：获取原 CCXT 类
             self.exchange = exchange_class(config)  # Lighter 接入：不改变 Aster/CCXT 行为
         self.exchange_id = exchange_id  # Lighter 接入：供订单最终状态确认使用
@@ -115,6 +122,13 @@ class GridTrader:
         if self.gridLines % 2 != 0:
             sys.exit("gridLines must be an even number")
         try:
+            if exchange_id == "ondo":  # Ondo 接入：防止网格间距取整后重叠
+                step = Decimal(str(self.gridStep))
+                tick = Decimal(market["precision"]["price"])
+                if not step.is_finite() or step <= 0 or step % tick:
+                    raise ValueError(f"gridStep must be a positive multiple of {tick}")
+                if Decimal(self.exchange.amount_to_precision(self.symbol, self.orderSize)) <= 0:
+                    raise ValueError("orderSize is below the Ondo size increment")
             # 用交易所精度和 market limits 预校验订单数量/名义价值。
             self.validate_order(float(self.exchange.amount_to_precision(self.symbol, self.orderSize)), self.lowLimit)
         except Exception as e:
@@ -307,17 +321,17 @@ class GridTrader:
             sys.exit(1)
 
         open_ids = {str(o["id"]) for o in orders if o.get("id")}  # Lighter 接入：统一字符串订单 ID
-        missing_ids = set(self.All_orders) - open_ids  # Lighter 接入：先视为待确认的消失订单
-        filled_ids = missing_ids  # Lighter 接入：CCXT 平台沿用原有成交推断
+        missing_ids = set(self.All_orders) - open_ids  # 本进程记录中已从挂单列表消失的订单
+        filled_ids = missing_ids  # Ondo 接入：与 Aster 一致，消失订单直接按成交处理
         canceled_ids = set()
-        if self.exchange_id == "lighter" and missing_ids:  # Lighter 接入：查询排序器最终状态
+        if self.exchange_id == "lighter" and missing_ids:  # 仅 Lighter 查询最终状态
             try:  # Lighter 接入：状态查询失败时不误补反向单
                 statuses = self.exchange.fetch_order_statuses(  # Lighter 接入：批量查询消失订单
                     self.symbol,
                     missing_ids,
                 )
             except Exception as e:  # Lighter 接入：等待下一轮重新查询
-                logger.warning(f"fetch Lighter order statuses failed: {e}")  # Lighter 接入：保留诊断信息
+                logger.warning(f"fetch {self.exchange_id} order statuses failed: {e}")
                 return  # Lighter 接入：状态未知时禁止推断成交
 
             canceled_ids = {  # Lighter 接入：撤单按原参数重新挂单
@@ -433,6 +447,8 @@ class GridTrader:
                         logger.error(f"cancel on exit failed: {e}")
                         self.notify(f"{self.name} cancel on exit failed: {e}")
                 sys.exit(0)
+            except OndoFatalError as e:  # Ondo 接入：不确定订单或部分成交撤单立即风控退出
+                self.critical("Ondo order cannot be safely recovered", e, exit_after=True)
             except Exception as e:
                 if placing_grid:
                     # 如果建网格中途失败，下轮继续尝试重建。

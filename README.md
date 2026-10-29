@@ -12,8 +12,6 @@
 
 &#x20;然后配置：
 
-
-
 &#x20; EXCHANGE=lighter
 
 &#x20; LIGHTER\_NETWORK=robinhood
@@ -25,8 +23,6 @@
 
 
 &#x20; Ubuntu 上运行 Lighter：
-
-
 
 &#x20; python3 -m venv .venv-lighter
 
@@ -45,54 +41,6 @@ cd \~/myGrid
 source .venv-lighter/bin/activate
 
 python ccxt\_grid.py
-
-
-
-› 那我如何启动Aster网格？
-
-
-
-
-
-• 在 Ubuntu 中为 Aster 单独建立虚拟环境：
-
-
-
-&#x20; cd /你的脚本目录
-
-
-
-&#x20; python3 -m venv .venv-aster
-
-&#x20; source .venv-aster/bin/activate
-
-
-
-&#x20; python -m pip install --upgrade pip
-
-&#x20; pip install -r requirements-aster.txt
-
-
-
-&#x20; 确认 .env 中有效配置为：
-
-
-
-&#x20; EXCHANGE=aster
-
-&#x20; 然后启动：
-
-
-
-&#x20; python -u ccxt\_grid.py
-
-
-
-
-
-
-
-
 
 
 
@@ -142,17 +90,13 @@ Prompt:
 
 
 
-
-
 那么请基于ccxt\_grid.py和.env和文件，使用lighter的sdk，而不是使用ccxt，添加lighter.xyz平台到脚本中，使我也能在lighter上跑单币种的中性网格。修改后脚本同样是在Ubuntu系统上运行。请遵循最小化的修改原则，小修小补。必要时建立requirements文件。请在ccxt\_grid.py中修改的语句后添加注释。
 
 lighter.xyz的api文档：https://apidocs.lighter.xyz/docs/get-started
 
 
 
-
-
-我写了一个asterdex平台的永续合约中性网格脚本：ccxt\_grid.py和.env文件，这个脚本是在Ubuntu系统上运行，请仔细研究这两个文件，弄清楚逻辑。因为接下来的工作都基于这两个文件。
+我写了一个asterdex和lighter平台的永续合约中性网格脚本：ccxt\_grid.py，lighter\_exchange.py和.env文件，这个脚本是在Ubuntu系统上运行，请仔细研究本目录文件，弄清楚逻辑。因为接下来的工作都基于这个脚本。
 
 
 
@@ -191,5 +135,65 @@ v2.0:
 
 
 
+v2.1：
+
+请修改或添加以下功能：
+
+1\. 新添加 app.ondoperps.xyz 平台，这个平台同样是永续合约平台，请根据api文档：https://docs.ondoperps.xyz/api-reference/api\_key\_authentication 写一个ondo的适配器，使之也能用 ccxt\_grid.py 进行网格交易。
+
+2\.在.env里添加与ondoperps有关的项目，如登录密钥变量。
+
+3\.添加ondo平台的requirements文件。
+
+要求：
+
+1\.脚本适合在Ubuntu运行；
+
+2\.代码和注释要简洁易读，应保留现有结构，减少微型辅助函数的封装，尽量扁平化。
+
+
+
+
+
 &#x20;
 
+
+
+## v2.1: Ondo Perps
+
+`ondo_exchange.py` 使用 API Key 签名调用 REST API，仅用于永续合约普通 GTC 限价网格。
+
+在 app.ondoperps.xyz 的 API Keys 页面创建具有账户读取、交易权限的密钥，在同目录 `.env` 中填写完整值（保留前缀）：
+
+```dotenv
+ONDO_API_KEY_ID=ondoKeyId_你的密钥ID
+ONDO_API_SECRET=ondoApiSecret_你的密钥Secret
+ONDO_API_URL=https://api.ondoperps.xyz
+ONDO_TIMEOUT=10
+```
+
+修改原有 `EXCHANGE` 为 `ondo`，使用原生交易对名称，例如 `SYMBOL=BTC-USD.P` 或 `SYMBOL=AAPL-USD.P`。同名配置以文件中最后一项为准；已有系统环境变量优先。同时为所选交易对设置 `orderSize`、`gridStep`、价格边界、基准价及仓位上限，不能直接沿用其他币种的参数。当前平台没有 DOGE 永续市场。
+
+数量按市场 `baseIncrement` 向下取整，价格按 `quoteIncrement` 四舍五入；`gridStep` 必须是价格步长的正整数倍。数量单位是标的资产数量。
+
+Ubuntu（Python 3.10+）使用独立环境：
+
+```bash
+cd ~/myGrid
+python3 -m venv .venv-ondo
+source .venv-ondo/bin/activate
+python -m pip install -r requirements-ondo.txt
+python ccxt_grid.py
+```
+
+再次启动时进入项目目录并激活 `.venv-ondo`，再运行 `python ccxt_grid.py`。服务器时钟需保持同步，API 签名允许的时间偏差为落后最多 10 秒、超前最多 1 秒。
+
+需要 sandbox 时，将 `ONDO_API_URL` 改为 `https://api.ondoperps-sandbox.xyz`，使用对应环境的 API 密钥。
+
+Ondo 网格与 Aster 一致，直接把本进程记录中从挂单列表消失的订单视为成交，不逐笔查询最终状态。普通订单消失后按配置数量补相邻反向单，最外层订单消失后重建网格。手动撤单、平台撤单及部分成交后撤单也按整单成交处理。Lighter 保留原有最终状态确认和撤单重挂逻辑。
+
+Ondo 下单超时仍会用客户端订单 ID 确认提交结果，仍无法确认则停止，避免重复下单；此保护与轮询中的成交推断独立。
+
+启动重建、风控和 Ctrl+C 的撤单范围仍为当前交易对的全部挂单。`.env` 已被 Git 忽略，不要提交实际密钥。
+
+官方说明：[认证](https://docs.ondoperps.xyz/api-reference/api_key_authentication)、[下单](https://docs.ondoperps.xyz/api-reference/orders/create-order)。
